@@ -1,9 +1,9 @@
 import { InjectRepository } from '@nestjs/typeorm';
 
-import { Command } from 'nest-commander';
 import { SemVer } from 'semver';
 import { Repository } from 'typeorm';
 
+import { Command } from 'nest-commander';
 import {
   ActiveOrSuspendedWorkspacesMigrationCommandRunner,
   RunOnWorkspaceArgs,
@@ -19,16 +19,20 @@ import { UpdateViewAggregateOperationsCommand } from 'src/database/commands/upgr
 import { UpgradeCreatedByEnumCommand } from 'src/database/commands/upgrade-version-command/0-51/0-51-update-workflow-trigger-type-enum.command';
 import { MigrateRelationsToFieldMetadataCommand } from 'src/database/commands/upgrade-version-command/0-52/0-52-migrate-relations-to-field-metadata.command';
 import { UpgradeDateAndDateTimeFieldsSettingsJsonCommand } from 'src/database/commands/upgrade-version-command/0-52/0-52-upgrade-settings-field';
+import { MigrateWorkflowEventListenersToAutomatedTriggersCommand } from 'src/database/commands/upgrade-version-command/0-53/0-53-migrate-workflow-event-listeners-to-automated-triggers.command';
 import { TwentyConfigService } from 'src/engine/core-modules/twenty-config/twenty-config.service';
 import { Workspace } from 'src/engine/core-modules/workspace/workspace.entity';
 import { TwentyORMGlobalManager } from 'src/engine/twenty-orm/twenty-orm-global.manager';
 import { SyncWorkspaceMetadataCommand } from 'src/engine/workspace-manager/workspace-sync-metadata/commands/sync-workspace-metadata.command';
-import { MigrateWorkflowEventListenersToAutomatedTriggersCommand } from 'src/database/commands/upgrade-version-command/0-53/0-53-migrate-workflow-event-listeners-to-automated-triggers.command';
+import { compareVersionMajorAndMinor } from 'src/utils/version/compare-version-minor-and-major';
+import { isDefined } from 'twenty-shared/utils';
 
 type VersionCommands = {
   beforeSyncMetadata: ActiveOrSuspendedWorkspacesMigrationCommandRunner[];
   afterSyncMetadata: ActiveOrSuspendedWorkspacesMigrationCommandRunner[];
 };
+
+type AllCommands = Record<string, VersionCommands>;
 @Command({
   name: 'upgrade',
   description: 'Upgrade workspaces to the latest version',
@@ -72,7 +76,7 @@ export class UpgradeCommand extends UpgradeCommandRunner {
       syncWorkspaceMetadataCommand,
     );
 
-    const _commands_043: VersionCommands = {
+    const commands_043: VersionCommands = {
       beforeSyncMetadata: [
         this.migrateRichTextContentPatchCommand,
         this.migrateIsSearchableForCustomObjectMetadataCommand,
@@ -84,7 +88,7 @@ export class UpgradeCommand extends UpgradeCommandRunner {
         this.addTasksAssignedToMeViewCommand,
       ],
     };
-    const _commands_044: VersionCommands = {
+    const commands_044: VersionCommands = {
       beforeSyncMetadata: [
         this.initializePermissionsCommand,
         this.updateViewAggregateOperationsCommand,
@@ -92,17 +96,17 @@ export class UpgradeCommand extends UpgradeCommandRunner {
       afterSyncMetadata: [],
     };
 
-    const _commands_050: VersionCommands = {
+    const commands_050: VersionCommands = {
       beforeSyncMetadata: [],
       afterSyncMetadata: [],
     };
 
-    const _commands_051: VersionCommands = {
+    const commands_051: VersionCommands = {
       beforeSyncMetadata: [this.upgradeCreatedByEnumCommand],
       afterSyncMetadata: [],
     };
 
-    const _commands_052: VersionCommands = {
+    const commands_052: VersionCommands = {
       beforeSyncMetadata: [
         this.upgradeDateAndDateTimeFieldsSettingsJsonCommand,
         this.migrateRelationsToFieldMetadataCommand,
@@ -117,7 +121,54 @@ export class UpgradeCommand extends UpgradeCommandRunner {
       ],
     };
 
-    this.commands = commands_053;
+    this.computeFromToVersionAndCommandsToRunForCurrentAppVersion({
+      '0.43.0': commands_043,
+      '0.44.0': commands_044,
+      '0.50.0': commands_050,
+      '0.51.0': commands_051,
+      '0.52.0': commands_052,
+      '0.53.0': commands_053,
+    });
+  }
+
+  private computeFromToVersionAndCommandsToRunForCurrentAppVersion(
+    allCommands: AllCommands,
+  ) {
+    const currentAppVersion = this.twentyConfigService.get('APP_VERSION');
+    if (!isDefined(currentAppVersion)) {
+      throw new Error(
+        'APP_VERSION is not defined. Should never occur please check the configuration.',
+      );
+    }
+
+    const currentCommands = allCommands[currentAppVersion];
+    if (!isDefined(currentCommands)) {
+      throw new Error(
+        `No commands found for version ${currentAppVersion}. Please check the commands record.`,
+      );
+    }
+    this.commands = currentCommands;
+
+    const parsedAppVersion = new SemVer(currentAppVersion);
+    const appVersionMajorAndMinor = `${parsedAppVersion.major}.${parsedAppVersion.minor}.0`;
+
+    const versionBeforeCurrentAppVersion = Object.keys(allCommands)
+      .sort()
+      .find((version) => {
+        const result = compareVersionMajorAndMinor(
+          appVersionMajorAndMinor,
+          version,
+        );
+        return result === 'lower';
+      });
+
+    if (!isDefined(versionBeforeCurrentAppVersion)) {
+      throw new Error(
+        `No version found before current app version ${currentAppVersion}. Please check the commands record.`,
+      );
+    }
+
+    this.fromWorkspaceVersion = new SemVer(versionBeforeCurrentAppVersion);
   }
 
   override async runBeforeSyncMetadata(args: RunOnWorkspaceArgs) {
